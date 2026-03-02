@@ -14,6 +14,58 @@ interface ParsedIdentifier {
   end: number;
 }
 
+interface ColumnRef {
+  raw: string;
+  key: string;
+}
+
+interface IndexEntry {
+  prefix: string;
+  name: ColumnRef;
+  columns: ColumnRef[];
+}
+
+interface ForeignKeyEntry {
+  type: "FOREIGN_KEY";
+  name?: ColumnRef;
+  columns: ColumnRef[];
+  referencedTable: ColumnRef;
+  referencedColumns: ColumnRef[];
+  onDelete?: string;
+  onUpdate?: string;
+}
+
+interface PrimaryKeyEntry {
+  type: "PRIMARY_KEY";
+  name?: ColumnRef;
+  columns: ColumnRef[];
+}
+
+interface UniqueConstraintEntry {
+  type: "UNIQUE";
+  name?: ColumnRef;
+  columns: ColumnRef[];
+}
+
+interface CheckConstraintEntry {
+  type: "CHECK";
+  name?: ColumnRef;
+  raw: string;
+}
+
+interface OtherConstraintEntry {
+  type: "OTHER";
+  name?: ColumnRef;
+  raw: string;
+}
+
+type ConstraintEntry =
+  | ForeignKeyEntry
+  | PrimaryKeyEntry
+  | UniqueConstraintEntry
+  | CheckConstraintEntry
+  | OtherConstraintEntry;
+
 interface ParsedCreateTable {
   tableName: string;
   tableKey: string;
@@ -21,9 +73,9 @@ interface ParsedCreateTable {
   createSuffix: string;
   columns: Map<string, string>;
   columnOrder: string[];
-  namedIndexes: Map<string, string>;
-  namedConstraints: Map<string, string>;
-  unnamedConstraints: string[];
+  namedIndexes: Map<string, IndexEntry>;
+  namedConstraints: Map<string, ConstraintEntry>;
+  unnamedConstraints: ConstraintEntry[];
 }
 
 interface TableState extends ParsedCreateTable {
@@ -198,39 +250,269 @@ function isConstraintDefinition(definition: string): boolean {
   );
 }
 
-function extractNamedConstraintKey(definition: string): string | undefined {
-  if (!/^\s*CONSTRAINT\b/i.test(definition)) return undefined;
+// ---------------------------------------------------------------------------
+// Structured index / constraint parsing
+// ---------------------------------------------------------------------------
 
-  const afterKeyword = definition.replace(/^\s*CONSTRAINT\s+/i, "");
-  const nameToken = readIdentifierToken(afterKeyword, 0);
-  if (!nameToken) return undefined;
-
-  return normalizeIdentifier(nameToken.value);
+function parseColumnRefList(colList: string): ColumnRef[] {
+  const refs: ColumnRef[] = [];
+  for (const part of splitTopLevelByComma(colList)) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const token = readIdentifierToken(trimmed, 0);
+    if (!token) continue;
+    refs.push({ raw: token.raw, key: normalizeIdentifier(token.value) });
+  }
+  return refs;
 }
 
-function extractNamedIndexKey(definition: string): string | undefined {
+function parseIndexEntry(definition: string): IndexEntry | undefined {
   const trimmed = definition.trim();
-  const indexKeywordMatch = /^(?:UNIQUE\s+)?(?:INDEX|KEY)\b/i.exec(trimmed);
-  if (!indexKeywordMatch) return undefined;
+  const prefixMatch = /^((?:UNIQUE\s+)?(?:INDEX|KEY))\b/i.exec(trimmed);
+  if (!prefixMatch) return undefined;
 
-  const nameToken = readIdentifierToken(trimmed, indexKeywordMatch[0].length);
+  const prefix = prefixMatch[1].replace(/\s+/g, " ").trim();
+  let cursor = prefixMatch[0].length;
+
+  while (cursor < trimmed.length && /\s/.test(trimmed[cursor] ?? "")) cursor++;
+
+  const nameToken = readIdentifierToken(trimmed, cursor);
   if (!nameToken) return undefined;
+  cursor = nameToken.end;
 
-  return normalizeIdentifier(nameToken.value);
+  while (cursor < trimmed.length && /\s/.test(trimmed[cursor] ?? "")) cursor++;
+
+  if ((trimmed[cursor] ?? "") !== "(") return undefined;
+
+  const closeParen = findMatchingParenIndex(trimmed, cursor);
+  if (closeParen === -1) return undefined;
+
+  const columns = parseColumnRefList(trimmed.slice(cursor + 1, closeParen));
+
+  return {
+    prefix,
+    name: { raw: nameToken.raw, key: normalizeIdentifier(nameToken.value) },
+    columns,
+  };
 }
 
-function extractReferencedTableKey(definition: string): string | undefined {
-  const referencesMatch = /\bREFERENCES\b/i.exec(definition);
+function parseForeignKeyConstraint(rest: string, name?: ColumnRef): ForeignKeyEntry | undefined {
+  const fkMatch = /^FOREIGN\s+KEY\s*/i.exec(rest);
+  if (!fkMatch) return undefined;
+  let cursor = fkMatch[0].length;
+
+  if ((rest[cursor] ?? "") !== "(") return undefined;
+  const colsClose = findMatchingParenIndex(rest, cursor);
+  if (colsClose === -1) return undefined;
+  const columns = parseColumnRefList(rest.slice(cursor + 1, colsClose));
+  cursor = colsClose + 1;
+
+  while (cursor < rest.length && /\s/.test(rest[cursor] ?? "")) cursor++;
+
+  const referencesMatch = /^REFERENCES\s*/i.exec(rest.slice(cursor));
   if (!referencesMatch) return undefined;
+  cursor += referencesMatch[0].length;
 
-  const identifier = readQualifiedIdentifier(
-    definition,
-    referencesMatch.index + referencesMatch[0].length
-  );
+  const refTable = readQualifiedIdentifier(rest, cursor);
+  if (!refTable) return undefined;
+  cursor = refTable.end;
 
-  if (!identifier) return undefined;
-  return normalizeIdentifier(identifier.value);
+  while (cursor < rest.length && /\s/.test(rest[cursor] ?? "")) cursor++;
+
+  let referencedColumns: ColumnRef[] = [];
+  if ((rest[cursor] ?? "") === "(") {
+    const refColsClose = findMatchingParenIndex(rest, cursor);
+    if (refColsClose !== -1) {
+      referencedColumns = parseColumnRefList(rest.slice(cursor + 1, refColsClose));
+      cursor = refColsClose + 1;
+    }
+  }
+
+  const remaining = rest.slice(cursor);
+  const onDeleteMatch =
+    /\bON\s+DELETE\s+(SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION|RESTRICT|CASCADE)\b/i.exec(remaining);
+  const onUpdateMatch =
+    /\bON\s+UPDATE\s+(SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION|RESTRICT|CASCADE)\b/i.exec(remaining);
+
+  return {
+    type: "FOREIGN_KEY",
+    name,
+    columns,
+    referencedTable: { raw: refTable.raw, key: normalizeIdentifier(refTable.value) },
+    referencedColumns,
+    onDelete: onDeleteMatch?.[1],
+    onUpdate: onUpdateMatch?.[1],
+  };
 }
+
+function parsePrimaryKeyConstraint(rest: string, name?: ColumnRef): PrimaryKeyEntry | undefined {
+  const match = /^PRIMARY\s+KEY\s*/i.exec(rest);
+  if (!match) return undefined;
+  let cursor = match[0].length;
+
+  if ((rest[cursor] ?? "") !== "(") return undefined;
+  const close = findMatchingParenIndex(rest, cursor);
+  if (close === -1) return undefined;
+  const columns = parseColumnRefList(rest.slice(cursor + 1, close));
+
+  return { type: "PRIMARY_KEY", name, columns };
+}
+
+function parseUniqueConstraint(rest: string, name?: ColumnRef): UniqueConstraintEntry | undefined {
+  const match = /^UNIQUE\b/i.exec(rest);
+  if (!match) return undefined;
+  let cursor = match[0].length;
+
+  // Skip optional INDEX/KEY keyword
+  const indexKeyword = /^\s*(?:INDEX|KEY)\b/i.exec(rest.slice(cursor));
+  if (indexKeyword) cursor += indexKeyword[0].length;
+
+  while (cursor < rest.length && /\s/.test(rest[cursor] ?? "")) cursor++;
+
+  // Skip optional index name before the column list
+  if ((rest[cursor] ?? "") !== "(") {
+    const optName = readIdentifierToken(rest, cursor);
+    if (optName) cursor = optName.end;
+    while (cursor < rest.length && /\s/.test(rest[cursor] ?? "")) cursor++;
+  }
+
+  if ((rest[cursor] ?? "") !== "(") return undefined;
+  const close = findMatchingParenIndex(rest, cursor);
+  if (close === -1) return undefined;
+  const columns = parseColumnRefList(rest.slice(cursor + 1, close));
+
+  return { type: "UNIQUE", name, columns };
+}
+
+function parseConstraintEntry(definition: string): ConstraintEntry | undefined {
+  let rest = definition.trim();
+  let name: ColumnRef | undefined;
+
+  if (/^CONSTRAINT\b/i.test(rest)) {
+    rest = rest.replace(/^CONSTRAINT\s+/i, "").trim();
+    const nameToken = readIdentifierToken(rest, 0);
+    if (nameToken) {
+      name = { raw: nameToken.raw, key: normalizeIdentifier(nameToken.value) };
+      rest = rest.slice(nameToken.end).trim();
+    }
+  }
+
+  if (/^FOREIGN\s+KEY\b/i.test(rest)) {
+    return parseForeignKeyConstraint(rest, name);
+  }
+  if (/^PRIMARY\s+KEY\b/i.test(rest)) {
+    return parsePrimaryKeyConstraint(rest, name);
+  }
+  if (/^UNIQUE\b/i.test(rest)) {
+    return parseUniqueConstraint(rest, name);
+  }
+  if (/^CHECK\b/i.test(rest)) {
+    return { type: "CHECK", name, raw: definition };
+  }
+
+  return { type: "OTHER", name, raw: definition };
+}
+
+// ---------------------------------------------------------------------------
+// Structured index / constraint rendering
+// ---------------------------------------------------------------------------
+
+function renderIndexEntry(entry: IndexEntry): string {
+  const cols = entry.columns.map((c) => c.raw).join(", ");
+  return `${entry.prefix} ${entry.name.raw} (${cols})`;
+}
+
+function renderConstraintEntry(entry: ConstraintEntry): string {
+  const prefix = entry.name ? `CONSTRAINT ${entry.name.raw} ` : "";
+  switch (entry.type) {
+    case "FOREIGN_KEY": {
+      const cols = entry.columns.map((c) => c.raw).join(", ");
+      const refCols = entry.referencedColumns.map((c) => c.raw).join(", ");
+      let result = `${prefix}FOREIGN KEY (${cols}) REFERENCES ${entry.referencedTable.raw} (${refCols})`;
+      if (entry.onDelete) result += ` ON DELETE ${entry.onDelete}`;
+      if (entry.onUpdate) result += ` ON UPDATE ${entry.onUpdate}`;
+      return result;
+    }
+    case "PRIMARY_KEY": {
+      const cols = entry.columns.map((c) => c.raw).join(", ");
+      return `${prefix}PRIMARY KEY (${cols})`;
+    }
+    case "UNIQUE": {
+      const cols = entry.columns.map((c) => c.raw).join(", ");
+      return `${prefix}UNIQUE (${cols})`;
+    }
+    case "CHECK":
+    case "OTHER":
+      return entry.raw;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Column operation helpers for DROP_COLUMN / RENAME_COLUMN
+// ---------------------------------------------------------------------------
+
+function removeColumnFromIndex(entry: IndexEntry, colKey: string): IndexEntry | null {
+  const filtered = entry.columns.filter((c) => c.key !== colKey);
+  if (filtered.length === 0) return null;
+  return { ...entry, columns: filtered };
+}
+
+function removeColumnFromConstraint(
+  entry: ConstraintEntry,
+  colKey: string
+): ConstraintEntry | null {
+  switch (entry.type) {
+    case "FOREIGN_KEY": {
+      const filtered = entry.columns.filter((c) => c.key !== colKey);
+      if (filtered.length === 0) return null;
+      return { ...entry, columns: filtered };
+    }
+    case "PRIMARY_KEY":
+    case "UNIQUE": {
+      const filtered = entry.columns.filter((c) => c.key !== colKey);
+      if (filtered.length === 0) return null;
+      return { ...entry, columns: filtered };
+    }
+    case "CHECK":
+    case "OTHER":
+      return entry;
+  }
+}
+
+function renameColumnInIndex(entry: IndexEntry, oldKey: string, newRef: ColumnRef): IndexEntry {
+  return {
+    ...entry,
+    columns: entry.columns.map((c) => (c.key === oldKey ? newRef : c)),
+  };
+}
+
+function renameColumnInConstraint(
+  entry: ConstraintEntry,
+  oldKey: string,
+  newRef: ColumnRef
+): ConstraintEntry {
+  switch (entry.type) {
+    case "FOREIGN_KEY":
+      return {
+        ...entry,
+        columns: entry.columns.map((c) => (c.key === oldKey ? newRef : c)),
+        referencedColumns: entry.referencedColumns.map((c) => (c.key === oldKey ? newRef : c)),
+      };
+    case "PRIMARY_KEY":
+    case "UNIQUE":
+      return {
+        ...entry,
+        columns: entry.columns.map((c) => (c.key === oldKey ? newRef : c)),
+      };
+    case "CHECK":
+    case "OTHER":
+      return entry;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transient table FK cleanup
+// ---------------------------------------------------------------------------
 
 function removeConstraintsReferencingTransientTables(
   tableState: TableState,
@@ -238,20 +520,21 @@ function removeConstraintsReferencingTransientTables(
 ): void {
   if (transientTables.size === 0) return;
 
-  for (const [constraintKey, definition] of tableState.namedConstraints) {
-    const referencedTable = extractReferencedTableKey(definition);
-    if (referencedTable && transientTables.has(referencedTable)) {
+  for (const [constraintKey, entry] of tableState.namedConstraints) {
+    if (entry.type === "FOREIGN_KEY" && transientTables.has(entry.referencedTable.key)) {
       tableState.namedConstraints.delete(constraintKey);
     }
   }
 
   tableState.unnamedConstraints = tableState.unnamedConstraints.filter(
-    (definition) => {
-      const referencedTable = extractReferencedTableKey(definition);
-      return !referencedTable || !transientTables.has(referencedTable);
-    }
+    (entry) =>
+      entry.type !== "FOREIGN_KEY" || !transientTables.has(entry.referencedTable.key)
   );
 }
+
+// ---------------------------------------------------------------------------
+// CREATE TABLE parsing / rendering
+// ---------------------------------------------------------------------------
 
 function parseCreateTableStatement(sql: string): ParsedCreateTable | undefined {
   const trimmed = sql.trim();
@@ -280,28 +563,27 @@ function parseCreateTableStatement(sql: string): ParsedCreateTable | undefined {
 
   const columns = new Map<string, string>();
   const columnOrder: string[] = [];
-  const namedIndexes = new Map<string, string>();
-  const namedConstraints = new Map<string, string>();
-  const unnamedConstraints: string[] = [];
+  const namedIndexes = new Map<string, IndexEntry>();
+  const namedConstraints = new Map<string, ConstraintEntry>();
+  const unnamedConstraints: ConstraintEntry[] = [];
 
   for (const part of splitTopLevelByComma(body)) {
     const entry = part.trim();
     if (!entry) continue;
 
-    const indexKey = extractNamedIndexKey(entry);
-    if (indexKey) {
-      namedIndexes.set(indexKey, entry);
+    const indexEntry = parseIndexEntry(entry);
+    if (indexEntry) {
+      namedIndexes.set(indexEntry.name.key, indexEntry);
       continue;
     }
 
     if (isConstraintDefinition(entry)) {
-      const constraintKey = extractNamedConstraintKey(entry);
-      if (constraintKey) {
-        namedConstraints.set(constraintKey, entry);
-      } else {
-        const normalized = normalizeSqlForCompare(entry);
-        if (!unnamedConstraints.some((existing) => normalizeSqlForCompare(existing) === normalized)) {
-          unnamedConstraints.push(entry);
+      const constraintEntry = parseConstraintEntry(entry);
+      if (constraintEntry) {
+        if (constraintEntry.name) {
+          namedConstraints.set(constraintEntry.name.key, constraintEntry);
+        } else {
+          unnamedConstraints.push(constraintEntry);
         }
       }
       continue;
@@ -309,10 +591,7 @@ function parseCreateTableStatement(sql: string): ParsedCreateTable | undefined {
 
     const columnToken = readIdentifierToken(entry, 0);
     if (!columnToken) {
-      const normalized = normalizeSqlForCompare(entry);
-      if (!unnamedConstraints.some((existing) => normalizeSqlForCompare(existing) === normalized)) {
-        unnamedConstraints.push(entry);
-      }
+      unnamedConstraints.push({ type: "OTHER", raw: entry });
       continue;
     }
 
@@ -342,16 +621,16 @@ function renderCreateTable(state: TableState): string {
     if (definition) lines.push(`  ${definition}`);
   }
 
-  for (const definition of state.namedConstraints.values()) {
-    lines.push(`  ${definition}`);
+  for (const entry of state.namedConstraints.values()) {
+    lines.push(`  ${renderConstraintEntry(entry)}`);
   }
 
-  for (const definition of state.namedIndexes.values()) {
-    lines.push(`  ${definition}`);
+  for (const entry of state.namedIndexes.values()) {
+    lines.push(`  ${renderIndexEntry(entry)}`);
   }
 
-  for (const definition of state.unnamedConstraints) {
-    lines.push(`  ${definition}`);
+  for (const entry of state.unnamedConstraints) {
+    lines.push(`  ${renderConstraintEntry(entry)}`);
   }
 
   const body = lines.join(",\n");
@@ -359,6 +638,10 @@ function renderCreateTable(state: TableState): string {
 
   return `${state.createPrefix} (\n${body}\n)${suffix}`;
 }
+
+// ---------------------------------------------------------------------------
+// ALTER TABLE clause parsers
+// ---------------------------------------------------------------------------
 
 function extractAlterClause(sql: string): string | undefined {
   const trimmed = sql.trim();
@@ -565,34 +848,6 @@ function replaceLeadingIdentifier(definition: string, newIdentifierRaw: string):
   return rest ? `${newIdentifierRaw} ${rest}` : newIdentifierRaw;
 }
 
-function parseAddConstraintDefinition(
-  clause: string
-): { definition: string; constraintKey?: string } | undefined {
-  if (!/^ADD\b/i.test(clause)) return undefined;
-
-  const definition = clause.replace(/^ADD\s+/i, "").trim();
-  if (!definition) return undefined;
-
-  return {
-    definition,
-    constraintKey: extractNamedConstraintKey(definition),
-  };
-}
-
-function parseAddIndexDefinition(
-  clause: string
-): { definition: string; indexKey?: string } | undefined {
-  if (!/^ADD\b/i.test(clause)) return undefined;
-
-  const definition = clause.replace(/^ADD\s+/i, "").trim();
-  if (!definition) return undefined;
-
-  return {
-    definition,
-    indexKey: extractNamedIndexKey(definition),
-  };
-}
-
 function parseDropIndexKeyFromClause(clause: string): string | undefined {
   if (!/^DROP\b/i.test(clause)) return undefined;
 
@@ -782,13 +1037,11 @@ export function squashMigrations(migrations: Migration[]): SquashResult {
             }
 
             case "ADD_CONSTRAINT": {
-              const parsedConstraint = parseAddConstraintDefinition(clause);
-              if (!parsedConstraint?.constraintKey) break;
+              const definition = clause.replace(/^ADD\s+/i, "").trim();
+              const entry = parseConstraintEntry(definition);
+              if (!entry?.name) break;
 
-              const lifecycleKey = getConstraintLifecycleKey(
-                tableKey,
-                parsedConstraint.constraintKey
-              );
+              const lifecycleKey = getConstraintLifecycleKey(tableKey, entry.name.key);
               pendingAddedConstraints.set(lifecycleKey, i);
               break;
             }
@@ -909,6 +1162,21 @@ export function squashMigrations(migrations: Migration[]): SquashResult {
             tableState.columns.delete(dropKey);
             tableState.columnOrder = tableState.columnOrder.filter((key) => key !== dropKey);
 
+            // Purge indexes / constraints whose column list becomes empty
+            for (const [key, entry] of tableState.namedIndexes) {
+              const updated = removeColumnFromIndex(entry, dropKey);
+              if (updated === null) tableState.namedIndexes.delete(key);
+              else tableState.namedIndexes.set(key, updated);
+            }
+            for (const [key, entry] of tableState.namedConstraints) {
+              const updated = removeColumnFromConstraint(entry, dropKey);
+              if (updated === null) tableState.namedConstraints.delete(key);
+              else tableState.namedConstraints.set(key, updated);
+            }
+            tableState.unnamedConstraints = tableState.unnamedConstraints
+              .map((e) => removeColumnFromConstraint(e, dropKey))
+              .filter((e): e is ConstraintEntry => e !== null);
+
             markRemoved(
               tracker,
               removedStatements,
@@ -930,6 +1198,24 @@ export function squashMigrations(migrations: Migration[]): SquashResult {
               replaceLeadingIdentifier(definition, parsedRename.toRaw)
             );
             updateColumnOrder(tableState.columnOrder, parsedRename.fromKey, parsedRename.toKey);
+
+            // Propagate rename into indexes and constraints
+            const newRef: ColumnRef = { raw: parsedRename.toRaw, key: parsedRename.toKey };
+            for (const [key, entry] of tableState.namedIndexes) {
+              tableState.namedIndexes.set(
+                key,
+                renameColumnInIndex(entry, parsedRename.fromKey, newRef)
+              );
+            }
+            for (const [key, entry] of tableState.namedConstraints) {
+              tableState.namedConstraints.set(
+                key,
+                renameColumnInConstraint(entry, parsedRename.fromKey, newRef)
+              );
+            }
+            tableState.unnamedConstraints = tableState.unnamedConstraints.map((e) =>
+              renameColumnInConstraint(e, parsedRename.fromKey, newRef)
+            );
 
             markRemoved(
               tracker,
@@ -975,29 +1261,20 @@ export function squashMigrations(migrations: Migration[]): SquashResult {
           }
 
           case "ADD_CONSTRAINT": {
-            const parsedConstraint = parseAddConstraintDefinition(clause);
-            if (!parsedConstraint) break;
+            const definition = clause.replace(/^ADD\s+/i, "").trim();
+            const entry = parseConstraintEntry(definition);
+            if (!entry) break;
 
-            if (parsedConstraint.constraintKey) {
-              tableState.namedConstraints.set(
-                parsedConstraint.constraintKey,
-                parsedConstraint.definition
-              );
+            if (entry.name) {
+              tableState.namedConstraints.set(entry.name.key, entry);
             } else {
-              const normalized = normalizeSqlForCompare(parsedConstraint.definition);
-              if (
-                !tableState.unnamedConstraints.some(
-                  (definition) => normalizeSqlForCompare(definition) === normalized
-                )
-              ) {
-                tableState.unnamedConstraints.push(parsedConstraint.definition);
-              }
+              tableState.unnamedConstraints.push(entry);
             }
 
             markRemoved(
               tracker,
               removedStatements,
-              `Folded constraint changes into CREATE TABLE "${tableState.tableName}"`
+              `Folded constraint into CREATE TABLE "${tableState.tableName}"`
             );
             break;
           }
@@ -1014,12 +1291,20 @@ export function squashMigrations(migrations: Migration[]): SquashResult {
             if (!removedAny && parsedDrop.dropPrimaryKey) {
               const before = tableState.unnamedConstraints.length;
               tableState.unnamedConstraints = tableState.unnamedConstraints.filter(
-                (definition) => !/^\s*PRIMARY\s+KEY\b/i.test(definition)
+                (entry) => entry.type !== "PRIMARY_KEY"
               );
               removedAny = before !== tableState.unnamedConstraints.length;
             }
 
-            if (!removedAny) break;
+            if (!removedAny) {
+              // Table is squash-owned; constraint was never created in squash range → no-op
+              markRemoved(
+                tracker,
+                removedStatements,
+                `Constraint not present in squash range (no-op)`
+              );
+              break;
+            }
 
             markRemoved(
               tracker,
@@ -1030,10 +1315,11 @@ export function squashMigrations(migrations: Migration[]): SquashResult {
           }
 
           case "ADD_INDEX": {
-            const parsedIndex = parseAddIndexDefinition(clause);
-            if (!parsedIndex?.indexKey) break;
+            const definition = clause.replace(/^ADD\s+/i, "").trim();
+            const entry = parseIndexEntry(definition);
+            if (!entry) break;
 
-            tableState.namedIndexes.set(parsedIndex.indexKey, parsedIndex.definition);
+            tableState.namedIndexes.set(entry.name.key, entry);
 
             markRemoved(
               tracker,

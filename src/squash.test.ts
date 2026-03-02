@@ -373,4 +373,129 @@ DROP INDEX \`Product_name_idx\` ON \`Product\`;
     expect(result.sql).not.toContain("Product_name_idx");
     expect(result.sql).not.toContain("DROP INDEX");
   });
+
+  // Issue 1 / Issue 5: DROP_COLUMN removes orphaned indexes and FK from CREATE TABLE
+  test("removes orphan indexes and FKs after DROP_COLUMN on squash-owned table", () => {
+    const result = squashSql([
+      `
+CREATE TABLE \`Location\` (
+  \`id\` INT NOT NULL,
+  \`catalog_id\` INT,
+  \`company_id\` INT,
+  INDEX \`Location_catalog_idx\`(\`catalog_id\`),
+  CONSTRAINT \`Location_company_fkey\` FOREIGN KEY (\`company_id\`) REFERENCES \`Company\`(\`id\`),
+  PRIMARY KEY (\`id\`)
+);
+`,
+      `
+ALTER TABLE \`Location\` DROP COLUMN \`catalog_id\`;
+ALTER TABLE \`Location\` DROP COLUMN \`company_id\`;
+`,
+    ]);
+
+    expect(result.sql).toContain("CREATE TABLE `Location`");
+    // The dropped columns' index and FK must be gone
+    expect(result.sql).not.toContain("catalog_id");
+    expect(result.sql).not.toContain("Location_catalog_idx");
+    expect(result.sql).not.toContain("company_id");
+    expect(result.sql).not.toContain("Location_company_fkey");
+    // No stray ALTER TABLE statements
+    expect(result.sql).not.toContain("ALTER TABLE");
+  });
+
+  // Issue 2: DROP FOREIGN KEY on squash-owned table that never had the FK is a no-op
+  test("removes DROP FOREIGN KEY that targets a constraint never created in squash range", () => {
+    const result = squashSql([
+      `
+CREATE TABLE \`Location\` (
+  \`id\` INT NOT NULL,
+  PRIMARY KEY (\`id\`)
+);
+`,
+      `
+ALTER TABLE \`Location\` DROP FOREIGN KEY \`Location_ibfk_1\`;
+`,
+    ]);
+
+    expect(result.sql).toContain("CREATE TABLE `Location`");
+    // The DROP FOREIGN KEY must be removed, not passed through
+    expect(result.sql).not.toContain("DROP FOREIGN KEY");
+    expect(result.removedStatements.some((s) => s.reason.includes("no-op"))).toBe(true);
+  });
+
+  // Issue 3: UPDATE against a transient table is removed
+  test("removes UPDATE statement targeting a table created then dropped in squash range", () => {
+    const result = squashSql([
+      `
+CREATE TABLE \`Product\` (
+  \`id\` INT NOT NULL,
+  \`status\` VARCHAR(50) NOT NULL,
+  PRIMARY KEY (\`id\`)
+);
+`,
+      `
+UPDATE \`Product\` SET \`status\` = 'active';
+`,
+      `
+DROP TABLE \`Product\`;
+`,
+    ]);
+
+    expect(result.sql).not.toContain("CREATE TABLE `Product`");
+    expect(result.sql).not.toContain("UPDATE");
+    expect(result.sql).not.toContain("DROP TABLE");
+  });
+
+  // Issue 4: RENAME_COLUMN updates column references inside inline indexes
+  test("propagates RENAME_COLUMN into inline UNIQUE INDEX on squash-owned table", () => {
+    const result = squashSql([
+      `
+CREATE TABLE \`APIKey\` (
+  \`id\` INT NOT NULL,
+  \`user_id\` INT NOT NULL,
+  UNIQUE INDEX \`APIKey_user_id_key\`(\`user_id\`),
+  PRIMARY KEY (\`id\`)
+);
+`,
+      `
+ALTER TABLE \`APIKey\` RENAME COLUMN \`user_id\` TO \`userId\`;
+`,
+    ]);
+
+    expect(result.sql).toContain("CREATE TABLE `APIKey`");
+    // Index must reference the new column name in its column list
+    expect(result.sql).toContain("APIKey_user_id_key");
+    expect(result.sql).toContain("(`userId`)");
+    // Old column name must not appear as a column reference
+    expect(result.sql).not.toContain("(`user_id`)");
+    // No stray ALTER TABLE
+    expect(result.sql).not.toContain("ALTER TABLE");
+  });
+
+  // Issue 5: join-table column renames propagate into the B index
+  test("propagates RENAME_COLUMN into join-table index on squash-owned table", () => {
+    const result = squashSql([
+      `
+CREATE TABLE \`_LocationToLocationAttribute\` (
+  \`A\` INT NOT NULL,
+  \`B\` INT NOT NULL,
+  INDEX \`_LocationToLocationAttribute_B_index\`(\`B\`),
+  PRIMARY KEY (\`A\`, \`B\`)
+);
+`,
+      `
+ALTER TABLE \`_LocationToLocationAttribute\` RENAME COLUMN \`A\` TO \`locationId\`;
+ALTER TABLE \`_LocationToLocationAttribute\` RENAME COLUMN \`B\` TO \`attributeId\`;
+`,
+    ]);
+
+    expect(result.sql).toContain("CREATE TABLE `_LocationToLocationAttribute`");
+    // Index must reference attributeId, not the old B
+    expect(result.sql).toContain("attributeId");
+    expect(result.sql).toContain("_LocationToLocationAttribute_B_index");
+    expect(result.sql).not.toContain("`B`");
+    expect(result.sql).not.toContain("`A`");
+    // No stray ALTER TABLE
+    expect(result.sql).not.toContain("ALTER TABLE");
+  });
 });

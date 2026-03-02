@@ -142,6 +142,24 @@ function extractTableName(sql: string): string | undefined {
   );
   if (alterMatch?.[1]) return extractLastIdentifier(alterMatch[1]);
 
+  // UPDATE `tableName` SET ...
+  const updateMatch = sql.match(
+    new RegExp(`^\\s*UPDATE\\s+(?:LOW_PRIORITY\\s+)?(?:IGNORE\\s+)?(${QUALIFIED_IDENTIFIER})`, "i")
+  );
+  if (updateMatch?.[1]) return extractLastIdentifier(updateMatch[1]);
+
+  // DELETE FROM `tableName`
+  const deleteMatch = sql.match(
+    new RegExp(`^\\s*DELETE\\s+FROM\\s+(${QUALIFIED_IDENTIFIER})`, "i")
+  );
+  if (deleteMatch?.[1]) return extractLastIdentifier(deleteMatch[1]);
+
+  // INSERT INTO `tableName`
+  const insertMatch = sql.match(
+    new RegExp(`^\\s*INSERT\\s+(?:INTO\\s+)?(${QUALIFIED_IDENTIFIER})`, "i")
+  );
+  if (insertMatch?.[1]) return extractLastIdentifier(insertMatch[1]);
+
   return undefined;
 }
 
@@ -335,6 +353,10 @@ export function parseStatement(sql: string): ParsedStatement {
     case "ALTER_ENUM":
     case "DROP_ENUM":
       result.enumName = extractEnumName(sql);
+      break;
+
+    case "OTHER":
+      result.table = extractTableName(sql);
       break;
   }
 
