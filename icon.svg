@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <title>Pattypan Squash Icon</title>
+  
+  <circle cx="60" cy="22" r="18" fill="#FDE047" />
+  <circle cx="87" cy="33" r="18" fill="#FDE047" />
+  <circle cx="98" cy="60" r="18" fill="#FDE047" />
+  <circle cx="87" cy="87" r="18" fill="#FDE047" />
+  <circle cx="60" cy="98" r="18" fill="#FDE047" />
+  <circle cx="33" cy="87" r="18" fill="#FDE047" />
+  <circle cx="22" cy="60" r="18" fill="#FDE047" />
+  <circle cx="33" cy="33" r="18" fill="#FDE047" />
+
+  <circle cx="60" cy="60" r="36" fill="#FACC15" />
+
+  <circle cx="60" cy="60" r="18" fill="#EAB308" />
+
+  <path d="M56,60 C56,45 53,35 53,35 C58,32 62,32 67,35 C67,35 64,45 64,60 Z" fill="#4ADE80" />
+  <ellipse cx="60" cy="36" rx="7" ry="4" fill="#22C55E" />
+</svg>

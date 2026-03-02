@@ -1,6 +1,10 @@
-# Pattypan
+<div align="center">
+  <img src="./icon.svg" alt="Pattypan" width="96" />
+  <h1>Pattypan</h1>
+  <p>Squash Prisma migrations into one compact baseline migration.</p>
+</div>
 
-Squash Prisma migrations into one compact baseline migration.
+
 
 The squasher folds compatible `ALTER TABLE` operations into the originating
 `CREATE TABLE` so output is a compact schema baseline (instead of appending
