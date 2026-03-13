@@ -7,7 +7,12 @@ export type StatementType =
   | "CREATE_ENUM"
   | "ALTER_ENUM"
   | "DROP_ENUM"
+  | "INSERT"
+  | "UPDATE"
+  | "DELETE"
   | "OTHER";
+
+export type DmlStatementType = "INSERT" | "UPDATE" | "DELETE";
 
 export type AlterOperation =
   | "ADD_COLUMN"
@@ -274,8 +279,19 @@ function determineStatementType(sql: string): StatementType {
   if (normalized.match(/^CREATE\s+TYPE.*AS\s+ENUM/)) return "CREATE_ENUM";
   if (normalized.startsWith("ALTER TYPE")) return "ALTER_ENUM";
   if (normalized.startsWith("DROP TYPE")) return "DROP_ENUM";
+  if (normalized.match(/^INSERT\b/)) return "INSERT";
+  if (normalized.match(/^UPDATE\b/)) return "UPDATE";
+  if (normalized.match(/^DELETE\b/)) return "DELETE";
 
   return "OTHER";
+}
+
+export function isDmlStatementType(type: StatementType): type is DmlStatementType {
+  return type === "INSERT" || type === "UPDATE" || type === "DELETE";
+}
+
+export function isDmlStatement(statement: Pick<ParsedStatement, "type">): boolean {
+  return isDmlStatementType(statement.type);
 }
 
 function determineAlterOperation(sql: string): AlterOperation {
@@ -355,6 +371,9 @@ export function parseStatement(sql: string): ParsedStatement {
       result.enumName = extractEnumName(sql);
       break;
 
+    case "INSERT":
+    case "UPDATE":
+    case "DELETE":
     case "OTHER":
       result.table = extractTableName(sql);
       break;

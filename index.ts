@@ -2,27 +2,38 @@
 import { mkdir, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import chalk from "chalk";
-import { scanMigrations } from "./src/scanner";
+import { isDmlStatement, parseSQL } from "./src/parser";
+import { scanMigrations, type Migration } from "./src/scanner";
 import { squashMigrations } from "./src/squash";
 import { parseExcludePatterns } from "./src/selection";
 import { assertOutputDirNotInSelectedMigrations } from "./src/output";
 import {
+  confirmRemoveDml,
   selectMigrations,
   type SelectionPreset,
   confirmSquash,
   getOutputName,
+  printKeptDmlWarning,
   printResult,
   printPreview,
 } from "./src/tui";
 
-interface CliOptions {
+export interface CliOptions {
   migrationsPath: string;
   fromMigration?: string;
   latestCount?: number;
   excludePatterns: string[];
   allowGaps: boolean;
   autoConfirm: boolean;
+  removeDml: boolean;
   outputName?: string;
+}
+
+export interface DmlHandlingState {
+  hasDml: boolean;
+  removeDml: boolean;
+  shouldPrompt: boolean;
+  shouldWarn: boolean;
 }
 
 function printHelp(): void {
@@ -35,18 +46,20 @@ Options:
   --latest, -n <count>    Legacy: squash latest N migrations
   --allow-gaps            Legacy latest mode: allow non-contiguous selection
   --yes, -y               Skip squash confirmation prompt
+  --remove-dml            Strip INSERT/UPDATE/DELETE from squashed output
   --name <migration>      Output migration directory name
   --help                  Show help
 `);
 }
 
-function parseCliOptions(argv: string[]): CliOptions {
+export function parseCliOptions(argv: string[]): CliOptions {
   let migrationsPath = "prisma/migrations";
   let fromMigration: string | undefined;
   let latestCount: number | undefined;
   const excludePatterns: string[] = [];
   let allowGaps = false;
   let autoConfirm = false;
+  let removeDml = false;
   let outputName: string | undefined;
 
   const args = [...argv];
@@ -110,6 +123,12 @@ function parseCliOptions(argv: string[]): CliOptions {
       continue;
     }
 
+    if (arg === "--remove-dml") {
+      removeDml = true;
+      i += 1;
+      continue;
+    }
+
     if (arg === "--name") {
       const value = args[i + 1];
       if (!value) {
@@ -140,8 +159,38 @@ function parseCliOptions(argv: string[]): CliOptions {
     excludePatterns,
     allowGaps,
     autoConfirm,
+    removeDml,
     outputName,
   };
+}
+
+export function migrationContainsDml(migration: Migration): boolean {
+  return parseSQL(migration.sql).some((statement) => isDmlStatement(statement));
+}
+
+export function selectedMigrationsContainDml(migrations: Migration[]): boolean {
+  return migrations.some((migration) => migrationContainsDml(migration));
+}
+
+export function getDmlHandlingState(
+  options: Pick<CliOptions, "autoConfirm" | "removeDml">,
+  hasDml: boolean
+): DmlHandlingState {
+  const shouldPrompt = hasDml && !options.autoConfirm && !options.removeDml;
+
+  return {
+    hasDml,
+    removeDml: options.removeDml,
+    shouldPrompt,
+    shouldWarn: hasDml && options.autoConfirm && !options.removeDml,
+  };
+}
+
+export function shouldCancelSquashAfterRemovingDml(
+  removeDml: boolean,
+  keptStatementCount: number
+): boolean {
+  return removeDml && keptStatementCount === 0;
 }
 
 async function main() {
@@ -181,7 +230,23 @@ async function main() {
       process.exit(0);
     }
 
-    const result = squashMigrations(selected);
+    const hasDml = selectedMigrationsContainDml(selected);
+    const dmlHandling = getDmlHandlingState(options, hasDml);
+    let removeDml = dmlHandling.removeDml;
+
+    if (dmlHandling.shouldPrompt) {
+      removeDml = await confirmRemoveDml();
+    } else if (dmlHandling.shouldWarn) {
+      printKeptDmlWarning();
+    }
+
+    const result = squashMigrations(selected, { removeDml });
+
+    if (shouldCancelSquashAfterRemovingDml(removeDml, result.keptStatements.length)) {
+      console.log(chalk.yellow("Removing DML left no statements to write. Squash cancelled."));
+      process.exit(0);
+    }
+
     printPreview(result);
 
     if (!options.autoConfirm) {
@@ -212,4 +277,6 @@ async function main() {
   }
 }
 
-main();
+if (import.meta.main) {
+  void main();
+}

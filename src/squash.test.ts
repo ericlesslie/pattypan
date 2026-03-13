@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Migration } from "./scanner";
-import { squashMigrations } from "./squash";
+import { squashMigrations, type SquashOptions } from "./squash";
 
 function buildMigration(index: number, sql: string): Migration {
   const timestamp = `${20240101000000 + index}`;
@@ -13,9 +13,12 @@ function buildMigration(index: number, sql: string): Migration {
   };
 }
 
-function squashSql(sqlStatements: string[]): ReturnType<typeof squashMigrations> {
+function squashSql(
+  sqlStatements: string[],
+  options?: SquashOptions
+): ReturnType<typeof squashMigrations> {
   const migrations = sqlStatements.map((sql, index) => buildMigration(index + 1, sql));
-  return squashMigrations(migrations);
+  return squashMigrations(migrations, options);
 }
 
 describe("squashMigrations", () => {
@@ -440,6 +443,77 @@ UPDATE \`Product\` SET \`status\` = 'active';
 DROP TABLE \`Product\`;
 `,
     ]);
+
+    expect(result.sql).not.toContain("CREATE TABLE `Product`");
+    expect(result.sql).not.toContain("UPDATE");
+    expect(result.sql).not.toContain("DROP TABLE");
+  });
+
+  test("keeps non-transient DML by default", () => {
+    const result = squashSql([
+      `
+CREATE TABLE \`User\` (
+  \`id\` INT NOT NULL,
+  \`email\` VARCHAR(191) NOT NULL,
+  PRIMARY KEY (\`id\`)
+);
+`,
+      `
+UPDATE \`User\` SET \`email\` = 'user@example.com';
+`,
+    ]);
+
+    expect(result.sql).toContain("CREATE TABLE `User`");
+    expect(result.sql).toContain("UPDATE `User` SET `email` = 'user@example.com'");
+  });
+
+  test("removes INSERT, UPDATE, and DELETE when removeDml is enabled", () => {
+    const result = squashSql(
+      [
+        `
+CREATE TABLE \`User\` (
+  \`id\` INT NOT NULL,
+  \`email\` VARCHAR(191) NOT NULL,
+  PRIMARY KEY (\`id\`)
+);
+`,
+        `
+INSERT INTO \`User\` (\`id\`, \`email\`) VALUES (1, 'first@example.com');
+UPDATE \`User\` SET \`email\` = 'user@example.com';
+DELETE FROM \`User\` WHERE \`id\` = 1;
+`,
+      ],
+      { removeDml: true }
+    );
+
+    expect(result.sql).toContain("CREATE TABLE `User`");
+    expect(result.sql).not.toContain("INSERT INTO `User`");
+    expect(result.sql).not.toContain("UPDATE `User`");
+    expect(result.sql).not.toContain("DELETE FROM `User`");
+    expect(
+      result.removedStatements.filter((entry) => entry.reason === "Removed by DML removal option")
+    ).toHaveLength(3);
+  });
+
+  test("still removes transient-table DML when removeDml is enabled", () => {
+    const result = squashSql(
+      [
+        `
+CREATE TABLE \`Product\` (
+  \`id\` INT NOT NULL,
+  \`status\` VARCHAR(50) NOT NULL,
+  PRIMARY KEY (\`id\`)
+);
+`,
+        `
+UPDATE \`Product\` SET \`status\` = 'active';
+`,
+        `
+DROP TABLE \`Product\`;
+`,
+      ],
+      { removeDml: true }
+    );
 
     expect(result.sql).not.toContain("CREATE TABLE `Product`");
     expect(result.sql).not.toContain("UPDATE");

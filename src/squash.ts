@@ -1,5 +1,5 @@
 import type { Migration } from "./scanner";
-import { parseSQL, type ParsedStatement } from "./parser";
+import { isDmlStatement, parseSQL, type ParsedStatement } from "./parser";
 
 interface StatementTracker {
   statement: ParsedStatement;
@@ -94,6 +94,10 @@ export interface SquashResult {
     statement: string;
     migration: string;
   }>;
+}
+
+export interface SquashOptions {
+  removeDml?: boolean;
 }
 
 function normalizeIdentifier(name: string): string {
@@ -923,7 +927,10 @@ function updateColumnOrder(order: string[], fromKey: string, toKey: string): voi
   order[index] = toKey;
 }
 
-export function squashMigrations(migrations: Migration[]): SquashResult {
+export function squashMigrations(
+  migrations: Migration[],
+  options: SquashOptions = {}
+): SquashResult {
   const allTrackers: StatementTracker[] = [];
   const removedStatements: SquashResult["removedStatements"] = [];
   const keptStatements: SquashResult["keptStatements"] = [];
@@ -1465,6 +1472,14 @@ export function squashMigrations(migrations: Migration[]): SquashResult {
           break;
         }
       }
+    }
+  }
+
+  if (options.removeDml) {
+    for (const tracker of allTrackers) {
+      if (tracker.removed || !isDmlStatement(tracker.statement)) continue;
+
+      markRemoved(tracker, removedStatements, "Removed by DML removal option");
     }
   }
 

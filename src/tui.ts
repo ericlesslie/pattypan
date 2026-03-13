@@ -278,6 +278,21 @@ export async function confirmSquash(
   });
 }
 
+export async function confirmRemoveDml(): Promise<boolean> {
+  return await confirm({
+    message: "Remove data-migration statements (INSERT/UPDATE/DELETE) from the squashed output?",
+    default: false,
+  });
+}
+
+export function printKeptDmlWarning(): void {
+  console.log(
+    chalk.yellow(
+      "Selected migrations contain INSERT/UPDATE/DELETE statements. Continuing with DML kept in the squashed output. Use --remove-dml to strip them in non-interactive runs."
+    )
+  );
+}
+
 export async function getOutputName(): Promise<string> {
   const timestamp = new Date()
     .toISOString()

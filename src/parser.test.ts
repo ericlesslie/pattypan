@@ -31,6 +31,26 @@ describe("parser", () => {
     expect(parsed[0]?.column).toBe("email");
   });
 
+  test("classifies DML statements and preserves target tables", () => {
+    const parsed = parseSQL(`
+INSERT INTO \`User\` (\`id\`) VALUES (1);
+UPDATE \`User\` SET \`email\` = 'user@example.com';
+DELETE FROM \`User\` WHERE \`id\` = 1;
+`);
+
+    expect(parsed).toHaveLength(3);
+    expect(parsed.map((statement) => statement.type)).toEqual([
+      "INSERT",
+      "UPDATE",
+      "DELETE",
+    ]);
+    expect(parsed.map((statement) => statement.table)).toEqual([
+      "User",
+      "User",
+      "User",
+    ]);
+  });
+
   test("strips inline -- comments from SQL", () => {
     const sql = `
 ALTER TABLE \`User\` MODIFY \`email\` VARCHAR(191) NULL; -- was NOT NULL

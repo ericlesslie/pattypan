@@ -58,9 +58,14 @@ Useful options:
 - `--exclude <patterns>`: comma-separated migration filters to skip
   - supports `*` wildcard, otherwise substring matching
 - `--yes, -y`: skip confirmation prompt
+- `--remove-dml`: strip `INSERT`, `UPDATE`, and `DELETE` statements from the squashed output
 - `--name <migration_name>`: set output migration directory name
 - `--latest, -n <count>`: legacy selection mode for latest N migrations
 - `--allow-gaps`: legacy latest mode only
+
+If selected migrations contain data-migration statements (`INSERT`, `UPDATE`, or `DELETE`),
+Pattypan keeps them by default. Interactive runs offer a prompt to remove them, and
+non-interactive runs can opt in with `--remove-dml`.
 
 Interactive modes:
 
