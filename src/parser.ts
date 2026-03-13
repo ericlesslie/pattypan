@@ -20,6 +20,8 @@ export type AlterOperation =
   | "ALTER_COLUMN"
   | "MODIFY_COLUMN"
   | "RENAME_COLUMN"
+  | "RENAME_INDEX"
+  | "RENAME_TABLE"
   | "ADD_CONSTRAINT"
   | "DROP_CONSTRAINT"
   | "ADD_INDEX"
@@ -114,6 +116,8 @@ function stripLineComments(sql: string): string {
           inString = false;
         } else if (!inString && char === "-" && (line[i + 1] ?? "") === "-") {
           return line.slice(0, i).trimEnd();
+        } else if (!inString && char === "#") {
+          return line.slice(0, i).trimEnd();
         }
       }
       return line;
@@ -201,13 +205,13 @@ function extractColumnName(sql: string): string | undefined {
 function extractIndexName(sql: string): string | undefined {
   // CREATE INDEX "indexName" or CREATE UNIQUE INDEX "indexName"
   const createMatch = sql.match(
-    /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?[""`]?(\w+)[""`]?/i
+    /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?[""`]?([\w.]+)[""`]?/i
   );
   if (createMatch) return createMatch[1];
 
   // DROP INDEX "indexName"
   const dropMatch = sql.match(
-    /DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?[""`]?(\w+)[""`]?/i
+    /DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?[""`]?([\w.]+)[""`]?/i
   );
   if (dropMatch) return dropMatch[1];
 
@@ -217,13 +221,19 @@ function extractIndexName(sql: string): string | undefined {
 function extractAlterIndexName(sql: string): string | undefined {
   // ALTER TABLE ... ADD INDEX "indexName"
   const addMatch = sql.match(
-    /ADD\s+(?:UNIQUE\s+)?INDEX\s+[""`]?(\w+)[""`]?/i
+    /ADD\s+(?:UNIQUE\s+)?INDEX\s+[""`]?([\w.]+)[""`]?/i
   );
   if (addMatch) return addMatch[1];
 
   // ALTER TABLE ... DROP INDEX "indexName"
-  const dropMatch = sql.match(/DROP\s+INDEX\s+[""`]?(\w+)[""`]?/i);
+  const dropMatch = sql.match(/DROP\s+INDEX\s+[""`]?([\w.]+)[""`]?/i);
   if (dropMatch) return dropMatch[1];
+
+  // ALTER TABLE ... RENAME INDEX "oldName" TO "newName"
+  const renameMatch = sql.match(
+    /RENAME\s+INDEX\s+[""`]?([\w.]+)[""`]?\s+TO\s+[""`]?[\w.]+[""`]?/i
+  );
+  if (renameMatch) return renameMatch[1];
 
   return undefined;
 }
@@ -250,19 +260,21 @@ function extractEnumName(sql: string): string | undefined {
 
 function extractConstraintName(sql: string): string | undefined {
   // ADD CONSTRAINT "constraintName"
-  const addMatch = sql.match(/ADD\s+CONSTRAINT\s+[""`]?(\w+)[""`]?/i);
+  const addMatch = sql.match(/ADD\s+CONSTRAINT\s+[""`]?([\w.]+)[""`]?/i);
   if (addMatch) return addMatch[1];
 
   // DROP CONSTRAINT "constraintName"
-  const dropMatch = sql.match(/DROP\s+CONSTRAINT\s+[""`]?(\w+)[""`]?/i);
+  const dropMatch = sql.match(/DROP\s+CONSTRAINT\s+[""`]?([\w.]+)[""`]?/i);
   if (dropMatch) return dropMatch[1];
 
   // DROP FOREIGN KEY "constraintName" (MySQL syntax)
-  const dropFkMatch = sql.match(/DROP\s+FOREIGN\s+KEY\s+[""`]?(\w+)[""`]?/i);
+  const dropFkMatch = sql.match(/DROP\s+FOREIGN\s+KEY\s+[""`]?([\w.]+)[""`]?/i);
   if (dropFkMatch) return dropFkMatch[1];
 
   // ADD FOREIGN KEY (implicit constraint name from CONSTRAINT keyword)
-  const addFkConstraint = sql.match(/ADD\s+CONSTRAINT\s+[""`]?(\w+)[""`]?\s+FOREIGN\s+KEY/i);
+  const addFkConstraint = sql.match(
+    /ADD\s+CONSTRAINT\s+[""`]?([\w.]+)[""`]?\s+FOREIGN\s+KEY/i
+  );
   if (addFkConstraint) return addFkConstraint[1];
 
   return undefined;
@@ -299,6 +311,7 @@ function determineAlterOperation(sql: string): AlterOperation {
 
   if (normalized.match(/\bADD\s+(UNIQUE\s+)?INDEX\b/)) return "ADD_INDEX";
   if (normalized.match(/\bDROP\s+INDEX\b/)) return "DROP_INDEX";
+  if (normalized.includes("RENAME INDEX")) return "RENAME_INDEX";
   if (normalized.includes("ADD CONSTRAINT")) return "ADD_CONSTRAINT";
   if (normalized.includes("DROP CONSTRAINT")) return "DROP_CONSTRAINT";
   // MySQL uses DROP FOREIGN KEY instead of DROP CONSTRAINT
@@ -308,12 +321,12 @@ function determineAlterOperation(sql: string): AlterOperation {
   if (normalized.includes("ADD FOREIGN KEY")) return "ADD_CONSTRAINT";
   if (normalized.includes("ADD CHECK")) return "ADD_CONSTRAINT";
   if (normalized.includes("DROP PRIMARY KEY")) return "DROP_CONSTRAINT";
+  if (normalized.match(/\bRENAME\s+TO\b/)) return "RENAME_TABLE";
   if (normalized.match(/ADD\s+(COLUMN\s+)?["`]?\w+["`]?\s+/)) return "ADD_COLUMN";
   if (normalized.match(/DROP\s+(COLUMN\s+)?["`]?\w+["`]?/)) return "DROP_COLUMN";
   if (normalized.match(/MODIFY\s+(COLUMN\s+)?["`]?\w+["`]?\s+/)) return "MODIFY_COLUMN";
   if (normalized.match(/ALTER\s+(COLUMN\s+)?["`]?\w+["`]?/)) return "ALTER_COLUMN";
-  if (normalized.includes("RENAME COLUMN") || normalized.includes("RENAME "))
-    return "RENAME_COLUMN";
+  if (normalized.includes("RENAME COLUMN")) return "RENAME_COLUMN";
 
   return "OTHER";
 }
@@ -351,7 +364,8 @@ export function parseStatement(sql: string): ParsedStatement {
       }
       if (
         result.alterOperation === "ADD_INDEX" ||
-        result.alterOperation === "DROP_INDEX"
+        result.alterOperation === "DROP_INDEX" ||
+        result.alterOperation === "RENAME_INDEX"
       ) {
         result.index = extractAlterIndexName(sql);
       }

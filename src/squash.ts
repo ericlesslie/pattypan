@@ -11,6 +11,7 @@ interface StatementTracker {
 interface ParsedIdentifier {
   raw: string;
   value: string;
+  start: number;
   end: number;
 }
 
@@ -66,8 +67,13 @@ type ConstraintEntry =
   | CheckConstraintEntry
   | OtherConstraintEntry;
 
+function isForeignKeyEntry(entry: ConstraintEntry): entry is ForeignKeyEntry {
+  return entry.type === "FOREIGN_KEY";
+}
+
 interface ParsedCreateTable {
   tableName: string;
+  tableNameRaw: string;
   tableKey: string;
   createPrefix: string;
   createSuffix: string;
@@ -128,6 +134,7 @@ function readIdentifierToken(input: string, start = 0): ParsedIdentifier | undef
     return {
       raw,
       value: raw.slice(1, -1),
+      start: i,
       end: j + 1,
     };
   }
@@ -141,6 +148,7 @@ function readIdentifierToken(input: string, start = 0): ParsedIdentifier | undef
   return {
     raw,
     value: raw,
+    start: i,
     end: j,
   };
 }
@@ -148,7 +156,7 @@ function readIdentifierToken(input: string, start = 0): ParsedIdentifier | undef
 function readQualifiedIdentifier(
   input: string,
   start: number
-): { raw: string; value: string; end: number } | undefined {
+): { raw: string; value: string; start: number; end: number } | undefined {
   const first = readIdentifierToken(input, start);
   if (!first) return undefined;
 
@@ -169,7 +177,7 @@ function readQualifiedIdentifier(
     i = next.end;
   }
 
-  return { raw, value, end: i };
+  return { raw, value, start: first.start, end: i };
 }
 
 function splitTopLevelByComma(input: string): string[] {
@@ -265,7 +273,7 @@ function parseColumnRefList(colList: string): ColumnRef[] {
     if (!trimmed) continue;
     const token = readIdentifierToken(trimmed, 0);
     if (!token) continue;
-    refs.push({ raw: token.raw, key: normalizeIdentifier(token.value) });
+    refs.push({ raw: trimmed, key: normalizeIdentifier(token.value) });
   }
   return refs;
 }
@@ -297,6 +305,52 @@ function parseIndexEntry(definition: string): IndexEntry | undefined {
     prefix,
     name: { raw: nameToken.raw, key: normalizeIdentifier(nameToken.value) },
     columns,
+  };
+}
+
+function parseStandaloneCreateIndexStatement(
+  sql: string
+): { tableKey: string; entry: IndexEntry } | undefined {
+  const trimmed = sql.trim();
+  const createMatch = /^CREATE\s+(UNIQUE\s+)?INDEX\b/i.exec(trimmed);
+  if (!createMatch) return undefined;
+
+  const prefix = createMatch[1] ? "UNIQUE INDEX" : "INDEX";
+  let cursor = createMatch[0].length;
+
+  const ifNotExists = /^\s*IF\s+NOT\s+EXISTS\b/i.exec(trimmed.slice(cursor));
+  if (ifNotExists) cursor += ifNotExists[0].length;
+
+  while (cursor < trimmed.length && /\s/.test(trimmed[cursor] ?? "")) cursor++;
+
+  const nameToken = readIdentifierToken(trimmed, cursor);
+  if (!nameToken) return undefined;
+  cursor = nameToken.end;
+
+  while (cursor < trimmed.length && /\s/.test(trimmed[cursor] ?? "")) cursor++;
+  if (!/^ON\b/i.test(trimmed.slice(cursor))) return undefined;
+  cursor += 2;
+
+  const tableToken = readQualifiedIdentifier(trimmed, cursor);
+  if (!tableToken) return undefined;
+  cursor = tableToken.end;
+
+  while (cursor < trimmed.length && /\s/.test(trimmed[cursor] ?? "")) cursor++;
+  if ((trimmed[cursor] ?? "") !== "(") return undefined;
+
+  const closeParen = findMatchingParenIndex(trimmed, cursor);
+  if (closeParen === -1) return undefined;
+
+  const trailing = trimmed.slice(closeParen + 1).trim();
+  if (trailing.length > 0) return undefined;
+
+  return {
+    tableKey: normalizeIdentifier(tableToken.value),
+    entry: {
+      prefix,
+      name: { raw: nameToken.raw, key: normalizeIdentifier(nameToken.value) },
+      columns: parseColumnRefList(trimmed.slice(cursor + 1, closeParen)),
+    },
   };
 }
 
@@ -451,6 +505,11 @@ function renderConstraintEntry(entry: ConstraintEntry): string {
   }
 }
 
+interface DeferredForeignKeySelection {
+  namedConstraintKeys: Set<string>;
+  unnamedConstraintIndexes: Set<number>;
+}
+
 // ---------------------------------------------------------------------------
 // Column operation helpers for DROP_COLUMN / RENAME_COLUMN
 // ---------------------------------------------------------------------------
@@ -459,6 +518,13 @@ function removeColumnFromIndex(entry: IndexEntry, colKey: string): IndexEntry | 
   const filtered = entry.columns.filter((c) => c.key !== colKey);
   if (filtered.length === 0) return null;
   return { ...entry, columns: filtered };
+}
+
+function renameColumnRef(ref: ColumnRef, newRef: ColumnRef): ColumnRef {
+  return {
+    raw: replaceLeadingIdentifier(ref.raw, newRef.raw),
+    key: newRef.key,
+  };
 }
 
 function removeColumnFromConstraint(
@@ -486,7 +552,7 @@ function removeColumnFromConstraint(
 function renameColumnInIndex(entry: IndexEntry, oldKey: string, newRef: ColumnRef): IndexEntry {
   return {
     ...entry,
-    columns: entry.columns.map((c) => (c.key === oldKey ? newRef : c)),
+    columns: entry.columns.map((c) => (c.key === oldKey ? renameColumnRef(c, newRef) : c)),
   };
 }
 
@@ -499,19 +565,46 @@ function renameColumnInConstraint(
     case "FOREIGN_KEY":
       return {
         ...entry,
-        columns: entry.columns.map((c) => (c.key === oldKey ? newRef : c)),
-        referencedColumns: entry.referencedColumns.map((c) => (c.key === oldKey ? newRef : c)),
+        columns: entry.columns.map((c) => (c.key === oldKey ? renameColumnRef(c, newRef) : c)),
+        referencedColumns: entry.referencedColumns.map((c) =>
+          c.key === oldKey ? renameColumnRef(c, newRef) : c
+        ),
       };
     case "PRIMARY_KEY":
     case "UNIQUE":
       return {
         ...entry,
-        columns: entry.columns.map((c) => (c.key === oldKey ? newRef : c)),
+        columns: entry.columns.map((c) => (c.key === oldKey ? renameColumnRef(c, newRef) : c)),
       };
     case "CHECK":
     case "OTHER":
       return entry;
   }
+}
+
+function renameTableInConstraint(
+  entry: ConstraintEntry,
+  oldTableKey: string,
+  newTableRef: ColumnRef
+): ConstraintEntry {
+  if (!isForeignKeyEntry(entry) || entry.referencedTable.key !== oldTableKey) {
+    return entry;
+  }
+
+  return {
+    ...entry,
+    referencedTable: newTableRef,
+  };
+}
+
+function renameIndexEntryName(entry: IndexEntry, newNameRaw: string): IndexEntry {
+  return {
+    ...entry,
+    name: {
+      raw: newNameRaw,
+      key: normalizeIdentifier(newNameRaw),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -525,15 +618,53 @@ function removeConstraintsReferencingTransientTables(
   if (transientTables.size === 0) return;
 
   for (const [constraintKey, entry] of tableState.namedConstraints) {
-    if (entry.type === "FOREIGN_KEY" && transientTables.has(entry.referencedTable.key)) {
+    if (isForeignKeyEntry(entry) && transientTables.has(entry.referencedTable.key)) {
       tableState.namedConstraints.delete(constraintKey);
     }
   }
 
   tableState.unnamedConstraints = tableState.unnamedConstraints.filter(
-    (entry) =>
-      entry.type !== "FOREIGN_KEY" || !transientTables.has(entry.referencedTable.key)
+    (entry) => !isForeignKeyEntry(entry) || !transientTables.has(entry.referencedTable.key)
   );
+}
+
+function isMySqlTableState(tableState: TableState): boolean {
+  return (
+    tableState.tableNameRaw.includes("`") ||
+    /(?:CHARACTER\s+SET|COLLATE|AUTO_INCREMENT)/i.test(tableState.createSuffix)
+  );
+}
+
+function getPrimaryKeyColumns(tableState: TableState): ColumnRef[] | undefined {
+  for (const entry of tableState.namedConstraints.values()) {
+    if (entry.type === "PRIMARY_KEY") return entry.columns;
+  }
+
+  for (const entry of tableState.unnamedConstraints) {
+    if (entry.type === "PRIMARY_KEY") return entry.columns;
+  }
+
+  return undefined;
+}
+
+function haveSameColumnKeys(left: ColumnRef[], right: ColumnRef[]): boolean {
+  return (
+    left.length === right.length && left.every((column, index) => column.key === right[index]?.key)
+  );
+}
+
+function removeRedundantPrimaryKeyIndexes(tableState: TableState): void {
+  if (!isMySqlTableState(tableState)) return;
+
+  const primaryKeyColumns = getPrimaryKeyColumns(tableState);
+  if (!primaryKeyColumns || primaryKeyColumns.length === 0) return;
+
+  for (const [indexKey, entry] of tableState.namedIndexes) {
+    if (!/^UNIQUE\b/i.test(entry.prefix)) continue;
+    if (haveSameColumnKeys(entry.columns, primaryKeyColumns)) {
+      tableState.namedIndexes.delete(indexKey);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,7 +692,7 @@ function parseCreateTableStatement(sql: string): ParsedCreateTable | undefined {
   const closeParen = findMatchingParenIndex(trimmed, openParen);
   if (closeParen === -1) return undefined;
 
-  const createPrefix = trimmed.slice(0, openParen).trim();
+  const createPrefix = trimmed.slice(0, tableIdentifier.start).trim();
   const createSuffix = trimmed.slice(closeParen + 1).trim();
   const body = trimmed.slice(openParen + 1, closeParen);
 
@@ -606,6 +737,7 @@ function parseCreateTableStatement(sql: string): ParsedCreateTable | undefined {
 
   return {
     tableName: tableIdentifier.value,
+    tableNameRaw: tableIdentifier.raw,
     tableKey: normalizeIdentifier(tableIdentifier.value),
     createPrefix,
     createSuffix,
@@ -617,7 +749,11 @@ function parseCreateTableStatement(sql: string): ParsedCreateTable | undefined {
   };
 }
 
-function renderCreateTable(state: TableState): string {
+function renderCreateTable(
+  state: TableState,
+  options: { deferredForeignKeys?: DeferredForeignKeySelection } = {}
+): string {
+  const deferredForeignKeys = options.deferredForeignKeys;
   const lines: string[] = [];
 
   for (const key of state.columnOrder) {
@@ -625,7 +761,13 @@ function renderCreateTable(state: TableState): string {
     if (definition) lines.push(`  ${definition}`);
   }
 
-  for (const entry of state.namedConstraints.values()) {
+  for (const [constraintKey, entry] of state.namedConstraints) {
+    if (
+      isForeignKeyEntry(entry) &&
+      deferredForeignKeys?.namedConstraintKeys.has(constraintKey)
+    ) {
+      continue;
+    }
     lines.push(`  ${renderConstraintEntry(entry)}`);
   }
 
@@ -633,14 +775,49 @@ function renderCreateTable(state: TableState): string {
     lines.push(`  ${renderIndexEntry(entry)}`);
   }
 
-  for (const entry of state.unnamedConstraints) {
+  for (const [index, entry] of state.unnamedConstraints.entries()) {
+    if (
+      isForeignKeyEntry(entry) &&
+      deferredForeignKeys?.unnamedConstraintIndexes.has(index)
+    ) {
+      continue;
+    }
     lines.push(`  ${renderConstraintEntry(entry)}`);
   }
 
   const body = lines.join(",\n");
   const suffix = state.createSuffix ? ` ${state.createSuffix}` : "";
 
-  return `${state.createPrefix} (\n${body}\n)${suffix}`;
+  return `${state.createPrefix} ${state.tableNameRaw} (\n${body}\n)${suffix}`;
+}
+
+function renderDeferredForeignKeyStatements(
+  state: TableState,
+  selection: DeferredForeignKeySelection
+): string[] {
+  const statements: string[] = [];
+
+  for (const [constraintKey, entry] of state.namedConstraints) {
+    if (
+      !isForeignKeyEntry(entry) ||
+      !selection.namedConstraintKeys.has(constraintKey)
+    ) {
+      continue;
+    }
+    statements.push(`ALTER TABLE ${state.tableNameRaw} ADD ${renderConstraintEntry(entry)}`);
+  }
+
+  for (const [index, entry] of state.unnamedConstraints.entries()) {
+    if (
+      !isForeignKeyEntry(entry) ||
+      !selection.unnamedConstraintIndexes.has(index)
+    ) {
+      continue;
+    }
+    statements.push(`ALTER TABLE ${state.tableNameRaw} ADD ${renderConstraintEntry(entry)}`);
+  }
+
+  return statements;
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +889,48 @@ function parseRenameColumnFromClause(
     fromKey: normalizeIdentifier(fromToken.value),
     toRaw: toToken.raw,
     toKey: normalizeIdentifier(toToken.value),
+  };
+}
+
+function parseRenameIndexFromClause(
+  clause: string
+): { fromKey: string; toRaw: string; toKey: string } | undefined {
+  let rest = clause.trim();
+  if (!/^RENAME\s+INDEX\b/i.test(rest)) return undefined;
+
+  rest = rest.replace(/^RENAME\s+INDEX\s+/i, "").trim();
+
+  const fromToken = readIdentifierToken(rest, 0);
+  if (!fromToken) return undefined;
+
+  const afterFrom = rest.slice(fromToken.end).trim();
+  if (!/^TO\b/i.test(afterFrom)) return undefined;
+
+  const toToken = readIdentifierToken(afterFrom.replace(/^TO\s+/i, ""), 0);
+  if (!toToken) return undefined;
+
+  return {
+    fromKey: normalizeIdentifier(fromToken.value),
+    toRaw: toToken.raw,
+    toKey: normalizeIdentifier(toToken.value),
+  };
+}
+
+function parseRenameTableFromClause(
+  clause: string
+): { toRaw: string; toKey: string; toValue: string } | undefined {
+  let rest = clause.trim();
+  if (!/^RENAME\s+TO\b/i.test(rest)) return undefined;
+
+  rest = rest.replace(/^RENAME\s+TO\s+/i, "").trim();
+
+  const toToken = readQualifiedIdentifier(rest, 0);
+  if (!toToken) return undefined;
+
+  return {
+    toRaw: toToken.raw,
+    toKey: normalizeIdentifier(toToken.value),
+    toValue: toToken.value,
   };
 }
 
@@ -905,6 +1124,34 @@ function getConstraintLifecycleKey(tableKey: string, constraintKey: string): str
   return `${tableKey}.constraint:${constraintKey}`;
 }
 
+function resolveCurrentTableKey(tableAliases: Map<string, string>, tableKey: string): string {
+  let current = tableKey;
+  const visited = new Set<string>();
+
+  while (!visited.has(current) && tableAliases.has(current)) {
+    visited.add(current);
+    current = tableAliases.get(current) as string;
+  }
+
+  return current;
+}
+
+function registerTableAlias(
+  tableAliases: Map<string, string>,
+  fromTableKey: string,
+  toTableKey: string
+): void {
+  if (fromTableKey === toTableKey) return;
+
+  tableAliases.set(fromTableKey, toTableKey);
+
+  for (const [aliasKey, targetKey] of tableAliases.entries()) {
+    if (targetKey === fromTableKey) {
+      tableAliases.set(aliasKey, toTableKey);
+    }
+  }
+}
+
 function markRemoved(
   tracker: StatementTracker,
   removedStatements: SquashResult["removedStatements"],
@@ -925,6 +1172,245 @@ function updateColumnOrder(order: string[], fromKey: string, toKey: string): voi
   const index = order.indexOf(fromKey);
   if (index === -1) return;
   order[index] = toKey;
+}
+
+function renameTableReferences(
+  tableStates: Map<string, TableState>,
+  oldTableKey: string,
+  newTableRef: ColumnRef
+): void {
+  for (const tableState of tableStates.values()) {
+    for (const [constraintKey, entry] of tableState.namedConstraints) {
+      tableState.namedConstraints.set(
+        constraintKey,
+        renameTableInConstraint(entry, oldTableKey, newTableRef)
+      );
+    }
+
+    tableState.unnamedConstraints = tableState.unnamedConstraints.map((entry) =>
+      renameTableInConstraint(entry, oldTableKey, newTableRef)
+    );
+  }
+}
+
+interface ForeignKeyRef {
+  tableKey: string;
+  namedConstraintKey?: string;
+  unnamedConstraintIndex?: number;
+  referencedTableKey: string;
+}
+
+interface ForeignKeyInlinePlan {
+  orderedTableKeys: string[];
+  deferredByTable: Map<string, DeferredForeignKeySelection>;
+}
+
+function buildForeignKeyRefs(tableState: TableState): ForeignKeyRef[] {
+  const refs: ForeignKeyRef[] = [];
+
+  for (const [constraintKey, entry] of tableState.namedConstraints) {
+    if (!isForeignKeyEntry(entry)) continue;
+    refs.push({
+      tableKey: tableState.tableKey,
+      namedConstraintKey: constraintKey,
+      referencedTableKey: entry.referencedTable.key,
+    });
+  }
+
+  for (const [index, entry] of tableState.unnamedConstraints.entries()) {
+    if (!isForeignKeyEntry(entry)) continue;
+    refs.push({
+      tableKey: tableState.tableKey,
+      unnamedConstraintIndex: index,
+      referencedTableKey: entry.referencedTable.key,
+    });
+  }
+
+  return refs;
+}
+
+function createEmptyDeferredSelection(): DeferredForeignKeySelection {
+  return {
+    namedConstraintKeys: new Set<string>(),
+    unnamedConstraintIndexes: new Set<number>(),
+  };
+}
+
+function markDeferredForeignKey(
+  deferredByTable: Map<string, DeferredForeignKeySelection>,
+  ref: ForeignKeyRef
+): void {
+  let selection = deferredByTable.get(ref.tableKey);
+  if (!selection) {
+    selection = createEmptyDeferredSelection();
+    deferredByTable.set(ref.tableKey, selection);
+  }
+
+  if (ref.namedConstraintKey) selection.namedConstraintKeys.add(ref.namedConstraintKey);
+  if (typeof ref.unnamedConstraintIndex === "number") {
+    selection.unnamedConstraintIndexes.add(ref.unnamedConstraintIndex);
+  }
+}
+
+function findStronglyConnectedComponents(graph: Map<string, Set<string>>): string[][] {
+  let index = 0;
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const indices = new Map<string, number>();
+  const lowLinks = new Map<string, number>();
+  const components: string[][] = [];
+
+  function strongConnect(node: string): void {
+    indices.set(node, index);
+    lowLinks.set(node, index);
+    index++;
+    stack.push(node);
+    onStack.add(node);
+
+    for (const next of graph.get(node) ?? []) {
+      if (!indices.has(next)) {
+        strongConnect(next);
+        lowLinks.set(node, Math.min(lowLinks.get(node) ?? 0, lowLinks.get(next) ?? 0));
+      } else if (onStack.has(next)) {
+        lowLinks.set(node, Math.min(lowLinks.get(node) ?? 0, indices.get(next) ?? 0));
+      }
+    }
+
+    if ((lowLinks.get(node) ?? -1) !== (indices.get(node) ?? -2)) return;
+
+    const component: string[] = [];
+    while (stack.length > 0) {
+      const current = stack.pop() as string;
+      onStack.delete(current);
+      component.push(current);
+      if (current === node) break;
+    }
+    components.push(component);
+  }
+
+  for (const node of graph.keys()) {
+    if (!indices.has(node)) strongConnect(node);
+  }
+
+  return components;
+}
+
+function buildForeignKeyInlinePlan(tableStates: TableState[]): ForeignKeyInlinePlan {
+  const createOrderIndex = new Map(
+    tableStates.map((tableState, index) => [tableState.tableKey, index] as const)
+  );
+  const survivingTableKeys = new Set(tableStates.map((tableState) => tableState.tableKey));
+  const deferredByTable = new Map<string, DeferredForeignKeySelection>();
+  const dependencyGraph = new Map<string, Set<string>>();
+  const graphEdges: Array<{ from: string; to: string; ref: ForeignKeyRef }> = [];
+
+  for (const tableState of tableStates) {
+    dependencyGraph.set(tableState.tableKey, new Set<string>());
+  }
+
+  for (const tableState of tableStates) {
+    for (const ref of buildForeignKeyRefs(tableState)) {
+      if (!survivingTableKeys.has(ref.referencedTableKey)) {
+        markDeferredForeignKey(deferredByTable, ref);
+        continue;
+      }
+
+      if (ref.referencedTableKey === ref.tableKey) {
+        continue;
+      }
+
+      (dependencyGraph.get(ref.referencedTableKey) as Set<string>).add(ref.tableKey);
+      graphEdges.push({
+        from: ref.referencedTableKey,
+        to: ref.tableKey,
+        ref,
+      });
+    }
+  }
+
+  const componentByTable = new Map<string, number>();
+  const components = findStronglyConnectedComponents(dependencyGraph);
+  const componentOrderByTable = new Map<string, number>();
+  for (const [componentIndex, component] of components.entries()) {
+    const orderedComponent = [...component].sort(
+      (left, right) => (createOrderIndex.get(left) ?? 0) - (createOrderIndex.get(right) ?? 0)
+    );
+    for (const tableKey of component) {
+      componentByTable.set(tableKey, componentIndex);
+    }
+    for (const [orderIndex, tableKey] of orderedComponent.entries()) {
+      componentOrderByTable.set(tableKey, orderIndex);
+    }
+  }
+
+  const prunedGraph = new Map<string, Set<string>>();
+  for (const tableKey of dependencyGraph.keys()) {
+    prunedGraph.set(tableKey, new Set<string>());
+  }
+
+  for (const edge of graphEdges) {
+    const fromComponent = componentByTable.get(edge.from);
+    const toComponent = componentByTable.get(edge.to);
+    const isIntraCycle =
+      typeof fromComponent === "number" &&
+      fromComponent === toComponent &&
+      (components[fromComponent]?.length ?? 0) > 1;
+
+    if (isIntraCycle) {
+      const fromOrder = componentOrderByTable.get(edge.from) ?? 0;
+      const toOrder = componentOrderByTable.get(edge.to) ?? 0;
+      if (fromOrder >= toOrder) {
+        markDeferredForeignKey(deferredByTable, edge.ref);
+        continue;
+      }
+    }
+
+    (prunedGraph.get(edge.from) as Set<string>).add(edge.to);
+  }
+
+  const indegree = new Map<string, number>();
+  for (const tableKey of prunedGraph.keys()) {
+    indegree.set(tableKey, 0);
+  }
+  for (const targets of prunedGraph.values()) {
+    for (const target of targets) {
+      indegree.set(target, (indegree.get(target) ?? 0) + 1);
+    }
+  }
+
+  const ready = [...prunedGraph.keys()]
+    .filter((tableKey) => (indegree.get(tableKey) ?? 0) === 0)
+    .sort((left, right) => (createOrderIndex.get(left) ?? 0) - (createOrderIndex.get(right) ?? 0));
+  const orderedTableKeys: string[] = [];
+
+  while (ready.length > 0) {
+    const tableKey = ready.shift() as string;
+    orderedTableKeys.push(tableKey);
+
+    for (const next of prunedGraph.get(tableKey) ?? []) {
+      indegree.set(next, (indegree.get(next) ?? 0) - 1);
+      if ((indegree.get(next) ?? 0) === 0) {
+        ready.push(next);
+      }
+    }
+
+    ready.sort(
+      (left, right) => (createOrderIndex.get(left) ?? 0) - (createOrderIndex.get(right) ?? 0)
+    );
+  }
+
+  if (orderedTableKeys.length !== tableStates.length) {
+    for (const tableState of tableStates) {
+      if (!orderedTableKeys.includes(tableState.tableKey)) {
+        orderedTableKeys.push(tableState.tableKey);
+      }
+    }
+  }
+
+  return {
+    orderedTableKeys,
+    deferredByTable,
+  };
 }
 
 export function squashMigrations(
@@ -954,6 +1440,7 @@ export function squashMigrations(
   const createdIndexes = new Map<string, number>();
   const createdEnums = new Map<string, number>();
   const transientTables = new Set<string>();
+  const tableAliases = new Map<string, string>();
 
   for (let i = 0; i < allTrackers.length; i++) {
     const tracker = allTrackers[i] as StatementTracker;
@@ -975,7 +1462,7 @@ export function squashMigrations(
       case "DROP_TABLE": {
         if (!stmt.table) break;
 
-        const tableKey = normalizeIdentifier(stmt.table);
+        const tableKey = resolveCurrentTableKey(tableAliases, normalizeIdentifier(stmt.table));
         const tableState = tableStates.get(tableKey);
         if (!tableState || tableState.dropped) break;
 
@@ -999,7 +1486,7 @@ export function squashMigrations(
       case "ALTER_TABLE": {
         if (!stmt.table || !stmt.alterOperation) break;
 
-        const tableKey = normalizeIdentifier(stmt.table);
+        const tableKey = resolveCurrentTableKey(tableAliases, normalizeIdentifier(stmt.table));
         const tableState = tableStates.get(tableKey);
 
         const clause = extractAlterClause(stmt.raw);
@@ -1062,21 +1549,36 @@ export function squashMigrations(
                 parsedDrop.constraintKey
               );
               const addTrackerIndex = pendingAddedConstraints.get(lifecycleKey);
-              if (typeof addTrackerIndex !== "number") break;
+              if (typeof addTrackerIndex === "number") {
+                markRemoved(
+                  allTrackers[addTrackerIndex] as StatementTracker,
+                  removedStatements,
+                  `Constraint "${parsedDrop.constraintKey}" was added then dropped`
+                );
+                markRemoved(
+                  tracker,
+                  removedStatements,
+                  `Constraint "${parsedDrop.constraintKey}" was added then dropped`
+                );
+                pendingAddedConstraints.delete(lifecycleKey);
+              } else {
+                const createIndexTrackerIndex = createdIndexes.get(parsedDrop.constraintKey);
+                if (typeof createIndexTrackerIndex !== "number") break;
 
-              markRemoved(
-                allTrackers[addTrackerIndex] as StatementTracker,
-                removedStatements,
-                `Constraint "${parsedDrop.constraintKey}" was added then dropped`
-              );
-              markRemoved(
-                tracker,
-                removedStatements,
-                `Constraint "${parsedDrop.constraintKey}" was added then dropped`
-              );
-              pendingAddedConstraints.delete(lifecycleKey);
-              break;
+                markRemoved(
+                  allTrackers[createIndexTrackerIndex] as StatementTracker,
+                  removedStatements,
+                  `Index "${parsedDrop.constraintKey}" was created then dropped`
+                );
+                markRemoved(
+                  tracker,
+                  removedStatements,
+                  `Index "${parsedDrop.constraintKey}" was created then dropped`
+                );
+                createdIndexes.delete(parsedDrop.constraintKey);
+              }
             }
+            break;
 
             case "MODIFY_COLUMN": {
               const parsed = parseModifyColumnFromClause(clause);
@@ -1232,6 +1734,51 @@ export function squashMigrations(
             break;
           }
 
+          case "RENAME_INDEX": {
+            const parsedRename = parseRenameIndexFromClause(clause);
+            if (!parsedRename) break;
+
+            const existing = tableState.namedIndexes.get(parsedRename.fromKey);
+            if (!existing) break;
+
+            tableState.namedIndexes.delete(parsedRename.fromKey);
+            tableState.namedIndexes.set(
+              parsedRename.toKey,
+              renameIndexEntryName(existing, parsedRename.toRaw)
+            );
+
+            markRemoved(
+              tracker,
+              removedStatements,
+              `Folded index changes into CREATE TABLE "${tableState.tableName}"`
+            );
+            break;
+          }
+
+          case "RENAME_TABLE": {
+            const parsedRename = parseRenameTableFromClause(clause);
+            if (!parsedRename) break;
+
+            tableStates.delete(tableKey);
+            tableState.tableName = parsedRename.toValue;
+            tableState.tableNameRaw = parsedRename.toRaw;
+            tableState.tableKey = parsedRename.toKey;
+            tableStates.set(parsedRename.toKey, tableState);
+            registerTableAlias(tableAliases, tableKey, parsedRename.toKey);
+
+            renameTableReferences(tableStates, tableKey, {
+              raw: parsedRename.toRaw,
+              key: parsedRename.toKey,
+            });
+
+            markRemoved(
+              tracker,
+              removedStatements,
+              `Folded table rename into CREATE TABLE "${tableState.tableName}"`
+            );
+            break;
+          }
+
           case "ALTER_COLUMN": {
             const parsedAlter = parseAlterColumnFromClause(clause);
             if (!parsedAlter) break;
@@ -1293,6 +1840,9 @@ export function squashMigrations(
             let removedAny = false;
             if (parsedDrop.constraintKey) {
               removedAny = tableState.namedConstraints.delete(parsedDrop.constraintKey);
+              if (!removedAny) {
+                removedAny = tableState.namedIndexes.delete(parsedDrop.constraintKey);
+              }
             }
 
             if (!removedAny && parsedDrop.dropPrimaryKey) {
@@ -1367,6 +1917,28 @@ export function squashMigrations(
       }
 
       case "CREATE_INDEX": {
+        const parsedCreateIndex = parseStandaloneCreateIndexStatement(stmt.raw);
+        const targetTableKey = parsedCreateIndex
+          ? resolveCurrentTableKey(tableAliases, parsedCreateIndex.tableKey)
+          : undefined;
+        const targetTableState = targetTableKey ? tableStates.get(targetTableKey) : undefined;
+
+        if (parsedCreateIndex && targetTableState && !targetTableState.dropped) {
+          if (isMySqlTableState(targetTableState)) {
+            targetTableState.namedIndexes.set(
+              parsedCreateIndex.entry.name.key,
+              parsedCreateIndex.entry
+            );
+
+            markRemoved(
+              tracker,
+              removedStatements,
+              `Folded index changes into CREATE TABLE "${targetTableState.tableName}"`
+            );
+            break;
+          }
+        }
+
         if (!stmt.index) break;
         createdIndexes.set(normalizeIdentifier(stmt.index), i);
         break;
@@ -1393,7 +1965,7 @@ export function squashMigrations(
         }
 
         if (stmt.table) {
-          const tableKey = normalizeIdentifier(stmt.table);
+          const tableKey = resolveCurrentTableKey(tableAliases, normalizeIdentifier(stmt.table));
           const tableState = tableStates.get(tableKey);
           if (tableState && !tableState.dropped) {
             tableState.namedIndexes.delete(indexKey);
@@ -1483,24 +2055,67 @@ export function squashMigrations(
     }
   }
 
-  for (const tableState of tableStates.values()) {
-    if (tableState.dropped) continue;
+  const survivingTableStates = [...tableStates.values()]
+    .filter((tableState) => !tableState.dropped)
+    .sort((left, right) => left.createTrackerIndex - right.createTrackerIndex);
 
+  for (const tableState of survivingTableStates) {
     removeConstraintsReferencingTransientTables(tableState, transientTables);
+    removeRedundantPrimaryKeyIndexes(tableState);
+  }
 
+  const foreignKeyInlinePlan = buildForeignKeyInlinePlan(survivingTableStates);
+  const survivingCreateTrackers = new Map<string, StatementTracker>();
+  for (const tableState of survivingTableStates) {
     const createTracker = allTrackers[tableState.createTrackerIndex];
     if (!createTracker || createTracker.removed) continue;
 
     createTracker.statement = {
       ...createTracker.statement,
-      raw: renderCreateTable(tableState),
+      raw: renderCreateTable(tableState, {
+        deferredForeignKeys:
+          foreignKeyInlinePlan.deferredByTable.get(tableState.tableKey) ??
+          createEmptyDeferredSelection(),
+      }),
     };
+    survivingCreateTrackers.set(tableState.tableKey, createTracker);
   }
 
-  const finalStatements: string[] = [];
-  for (const tracker of allTrackers) {
-    if (tracker.removed) continue;
+  const survivingOtherTrackers = allTrackers.filter(
+    (tracker) => !tracker.removed && tracker.statement.type !== "CREATE_TABLE"
+  );
+  const deferredForeignKeyStatements = foreignKeyInlinePlan.orderedTableKeys.flatMap((tableKey) => {
+    const tableState = tableStates.get(tableKey);
+    const createTracker = survivingCreateTrackers.get(tableKey);
+    if (!tableState || !createTracker) return [];
 
+    const deferredSelection =
+      foreignKeyInlinePlan.deferredByTable.get(tableKey) ?? createEmptyDeferredSelection();
+
+    return renderDeferredForeignKeyStatements(tableState, deferredSelection).map((statement) => ({
+      statement,
+      migration: createTracker.migrationName,
+    }));
+  });
+
+  const finalStatements: string[] = [];
+  for (const tableKey of foreignKeyInlinePlan.orderedTableKeys) {
+    const tracker = survivingCreateTrackers.get(tableKey);
+    if (!tracker) continue;
+
+    finalStatements.push(tracker.statement.raw);
+    keptStatements.push({
+      statement: tracker.statement.raw,
+      migration: tracker.migrationName,
+    });
+  }
+
+  for (const entry of deferredForeignKeyStatements) {
+    finalStatements.push(entry.statement);
+    keptStatements.push(entry);
+  }
+
+  for (const tracker of survivingOtherTrackers) {
     finalStatements.push(tracker.statement.raw);
     keptStatements.push({
       statement: tracker.statement.raw,
