@@ -1,10 +1,11 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, test } from "bun:test";
 import type { Migration } from "./src/scanner";
 import {
   getDmlHandlingState,
+  isMainModule,
   parseCliOptions,
   selectedMigrationsContainDml,
   shouldCancelSquashAfterRemovingDml,
@@ -89,6 +90,19 @@ describe("index helpers", () => {
     expect(shouldCancelSquashAfterRemovingDml(true, 0)).toBe(true);
     expect(shouldCancelSquashAfterRemovingDml(true, 2)).toBe(false);
     expect(shouldCancelSquashAfterRemovingDml(false, 0)).toBe(false);
+  });
+
+  test("treats symlinked entrypoints as the main module", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "pattypan-main-"));
+    const symlinkPath = join(tempRoot, "pattypan");
+
+    try {
+      await symlink(join(process.cwd(), "index.ts"), symlinkPath);
+
+      expect(isMainModule(new URL("./index.ts", import.meta.url).href, symlinkPath)).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 });
 

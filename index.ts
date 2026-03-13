@@ -1,3 +1,4 @@
+import { realpathSync } from "fs";
 import { mkdir, rm, writeFile } from "fs/promises";
 import { join, resolve } from "path";
 import { fileURLToPath } from "url";
@@ -294,11 +295,16 @@ async function main() {
   }
 }
 
-export function isMainModule(metaUrl: string): boolean {
-  const entryPath = process.argv[1];
+export function isMainModule(metaUrl: string, entryPath = process.argv[1]): boolean {
   if (!entryPath) return false;
 
-  return resolve(entryPath) === resolve(fileURLToPath(metaUrl));
+  const modulePath = fileURLToPath(metaUrl);
+
+  try {
+    return realpathSync(entryPath) === realpathSync(modulePath);
+  } catch {
+    return resolve(entryPath) === resolve(modulePath);
+  }
 }
 
 if (isMainModule(import.meta.url)) {
