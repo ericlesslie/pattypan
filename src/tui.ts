@@ -319,6 +319,31 @@ export function printResult(
   console.log(
     chalk.dim(`Removed redundant statements: ${result.removedStatements.length}`)
   );
+
+  if (prismaMigrationSyncScriptPath) {
+    console.log(chalk.bold.yellow("\n--- Deployment Instructions ---\n"));
+    console.log(
+      chalk.white(
+        "The sync script must run " +
+          chalk.bold("before") +
+          " prisma migrate deploy on existing databases."
+      )
+    );
+    console.log(
+      chalk.white(
+        "It safely skips fresh databases where _prisma_migrations doesn't exist yet.\n"
+      )
+    );
+    console.log(chalk.white("Recommended migration block:"));
+    console.log(chalk.cyan(`  1. ts-node ${prismaMigrationSyncScriptPath}`));
+    console.log(chalk.cyan("  2. prisma migrate deploy"));
+    console.log(chalk.cyan("  3. (any data migration scripts)\n"));
+    console.log(
+      chalk.dim(
+        "If using a Dockerfile, ensure the sync script runs before prisma migrate deploy."
+      )
+    );
+  }
 }
 
 export function printPreview(result: SquashResult): void {
