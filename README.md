@@ -10,16 +10,46 @@ The squasher folds compatible `ALTER TABLE` operations into the originating
 `CREATE TABLE` so output is a compact schema baseline (instead of appending
 retained statements).
 
-To install dependencies:
+## Requirements
+
+- [Node.js](https://nodejs.org) 18.18+ or [Bun](https://bun.com)
+- A Prisma project with a migrations directory such as `prisma/migrations`
+- If you plan to run the generated Prisma metadata sync helper: `prisma` and `@prisma/client`
+
+## Install
+
+For local development:
 
 ```bash
 bun install
 ```
 
-To run:
+Run directly from the repo:
 
 ```bash
 bun run index.ts
+```
+
+If you want a convenient local CLI during development, link it once from this repo:
+
+```bash
+bun link
+```
+
+Then you can run it as:
+
+```bash
+pattypan prisma/migrations
+```
+
+After publishing to npm, install or run it with either runtime:
+
+```bash
+npx pattypan
+```
+
+```bash
+bunx pattypan
 ```
 
 Primary workflow (boundary-based quick pick):
@@ -67,9 +97,35 @@ If selected migrations contain data-migration statements (`INSERT`, `UPDATE`, or
 Pattypan keeps them by default. Interactive runs offer a prompt to remove them, and
 non-interactive runs can opt in with `--remove-dml`.
 
-Each squash also writes a companion `syncPrismaMigrations.ts` file in the migrations
-directory root. It is intended for existing databases where you need to replace the
-selected `_prisma_migrations` rows with the new squashed migration entry.
+## Output
+
+Each squash writes:
+
+- a new squashed `migration.sql` inside the selected output migration directory
+- a companion `syncPrismaMigrations.ts` file in the migrations directory root
+
+The generated `syncPrismaMigrations.ts` helper is intended for existing databases where
+you need to replace the selected `_prisma_migrations` rows with the new squashed
+migration entry.
+
+## Publishing
+
+Pattypan now ships as a built Node-compatible CLI from `dist/cli.js`.
+
+Before publishing:
+
+```bash
+bun install
+bun run build
+npm pack --dry-run
+```
+
+Then publish:
+
+```bash
+npm login
+npm publish --access public
+```
 
 Interactive modes:
 

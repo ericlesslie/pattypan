@@ -2,18 +2,33 @@
   "name": "pattypan",
   "version": "1.0.0",
   "description": "Squash Prisma migrations with intelligent redundancy detection",
-  "module": "index.ts",
+  "license": "GPL-3.0-only",
   "type": "module",
   "bin": {
-    "pattypan": "./index.ts"
+    "pattypan": "./dist/cli.js"
   },
   "scripts": {
+    "build": "tsup",
     "start": "bun run index.ts",
-    "squash": "bun run index.ts"
+    "squash": "bun run index.ts",
+    "test": "bun test",
+    "prepublishOnly": "npm run build"
   },
-  "private": true,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "engines": {
+    "node": ">=18.18.0",
+    "bun": ">=1.3.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "tsup": "^8.3.6"
   },
   "peerDependencies": {
     "typescript": "^5"

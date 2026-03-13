@@ -1,6 +1,6 @@
-#!/usr/bin/env bun
 import { mkdir, rm, writeFile } from "fs/promises";
-import { join } from "path";
+import { join, resolve } from "path";
+import { fileURLToPath } from "url";
 import chalk from "chalk";
 import { isDmlStatement, parseSQL } from "./src/parser";
 import { scanMigrations, type Migration } from "./src/scanner";
@@ -294,6 +294,13 @@ async function main() {
   }
 }
 
-if (import.meta.main) {
+export function isMainModule(metaUrl: string): boolean {
+  const entryPath = process.argv[1];
+  if (!entryPath) return false;
+
+  return resolve(entryPath) === resolve(fileURLToPath(metaUrl));
+}
+
+if (isMainModule(import.meta.url)) {
   void main();
 }
