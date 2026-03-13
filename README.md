@@ -18,44 +18,42 @@ retained statements).
 
 ## Install
 
-For local development:
-
-```bash
-bun install
-```
-
-Run directly from the repo:
-
-```bash
-bun run index.ts
-```
-
-If you want a convenient local CLI during development, link it once from this repo:
-
-```bash
-bun link
-```
-
-Then you can run it as:
-
-```bash
-pattypan prisma/migrations
-```
-
-After publishing to npm, install or run it with either runtime:
+Run without installing:
 
 ```bash
 npx pattypan
 ```
 
+If you use Bun:
+
 ```bash
 bunx pattypan
 ```
 
+Install globally with npm:
+
+```bash
+npm install -g pattypan
+```
+
+Then run it as:
+
+```bash
+pattypan prisma/migrations
+```
+
+## Usage
+
 Primary workflow (boundary-based quick pick):
 
 ```bash
-bun run index.ts
+npx pattypan prisma/migrations
+```
+
+Or, if installed globally:
+
+```bash
+pattypan prisma/migrations
 ```
 
 In quick mode, you:
@@ -67,19 +65,19 @@ In quick mode, you:
 Non-interactive boundary workflow:
 
 ```bash
-bun run index.ts --from 20240115094500_add_orders
+npx pattypan prisma/migrations --from 20240115094500_add_orders
 ```
 
 You can also pass a unique fragment:
 
 ```bash
-bun run index.ts --from add_orders
+npx pattypan prisma/migrations --from add_orders
 ```
 
 Optional additive exclusions (applied after boundary selection):
 
 ```bash
-bun run index.ts --from add_orders --exclude production_20240101,production_20240115
+npx pattypan prisma/migrations --from add_orders --exclude production_20240101,production_20240115
 ```
 
 Useful options:
@@ -108,29 +106,23 @@ The generated `syncPrismaMigrations.ts` helper is intended for existing database
 you need to replace the selected `_prisma_migrations` rows with the new squashed
 migration entry.
 
-## Publishing
+## Development
 
-Pattypan now ships as a built Node-compatible CLI from `dist/cli.js`.
-
-Before publishing:
+If you are working on Pattypan itself:
 
 ```bash
 bun install
-bun run build
-npm pack --dry-run
 ```
 
-Then publish:
+```bash
+bun run build
+```
 
 ```bash
-npm login
-npm publish --access public
+bun test
 ```
 
 Interactive modes:
 
 - quick mode: pick boundary migration (recommended)
 - manual mode: checkbox migration selection
-
-This project was created using `bun init` in Bun v1.3.5. [Bun](https://bun.com)
-is a fast all-in-one JavaScript runtime.
