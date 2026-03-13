@@ -67,6 +67,10 @@ If selected migrations contain data-migration statements (`INSERT`, `UPDATE`, or
 Pattypan keeps them by default. Interactive runs offer a prompt to remove them, and
 non-interactive runs can opt in with `--remove-dml`.
 
+Each squash also writes a companion `syncPrismaMigrations.ts` file in the migrations
+directory root. It is intended for existing databases where you need to replace the
+selected `_prisma_migrations` rows with the new squashed migration entry.
+
 Interactive modes:
 
 - quick mode: pick boundary migration (recommended)

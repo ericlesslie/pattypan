@@ -9,6 +9,7 @@ import {
   selectedMigrationsContainDml,
   shouldCancelSquashAfterRemovingDml,
 } from "./index";
+import { PRISMA_MIGRATION_SYNC_SCRIPT_NAME } from "./src/prisma-sync";
 
 function migration(name: string, sql: string): Migration {
   return {
@@ -180,6 +181,65 @@ CREATE TABLE \`User\` (
       expect(await Bun.file(join(migrationsDir, secondMigration, "migration.sql")).exists()).toBe(
         true
       );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("writes a Prisma migration sync helper and removes selected migration directories", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "pattypan-"));
+    const migrationsDir = join(tempRoot, "migrations");
+    const outputName = "20240109999999_squashed";
+    const firstMigration = "20240101000000_init";
+    const secondMigration = "20240102000000_add_role";
+
+    try {
+      await createMigrationDir(
+        migrationsDir,
+        firstMigration,
+        `
+CREATE TABLE \`User\` (
+  \`id\` INT NOT NULL,
+  PRIMARY KEY (\`id\`)
+);
+`
+      );
+      await createMigrationDir(
+        migrationsDir,
+        secondMigration,
+        `
+ALTER TABLE \`User\` ADD COLUMN \`role\` VARCHAR(191) NULL;
+`
+      );
+
+      const result = runCli([
+        migrationsDir,
+        "--from",
+        firstMigration,
+        "--yes",
+        "--name",
+        outputName,
+      ]);
+
+      const syncScriptPath = join(
+        migrationsDir,
+        PRISMA_MIGRATION_SYNC_SCRIPT_NAME
+      );
+      const syncScript = await readFile(syncScriptPath, "utf-8");
+
+      expect(result.exitCode).toBe(0);
+      expect(syncScript).toContain('main()');
+      expect(syncScript).toContain("console.log('Finished');");
+      expect(syncScript).toContain(outputName);
+      expect(syncScript).toContain(firstMigration);
+      expect(syncScript).toContain(secondMigration);
+      expect(
+        await Bun.file(
+          join(migrationsDir, outputName, PRISMA_MIGRATION_SYNC_SCRIPT_NAME)
+        ).exists()
+      ).toBe(false);
+      expect(await Bun.file(join(migrationsDir, firstMigration)).exists()).toBe(false);
+      expect(await Bun.file(join(migrationsDir, secondMigration)).exists()).toBe(false);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

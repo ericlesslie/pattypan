@@ -305,9 +305,16 @@ export async function getOutputName(): Promise<string> {
   });
 }
 
-export function printResult(outputPath: string, result: SquashResult): void {
+export function printResult(
+  outputPath: string,
+  result: SquashResult,
+  prismaMigrationSyncScriptPath?: string
+): void {
   console.log(chalk.bold.green("\n✓ Migration squashed successfully!\n"));
   console.log(chalk.dim(`Output: ${outputPath}`));
+  if (prismaMigrationSyncScriptPath) {
+    console.log(chalk.dim(`Prisma sync helper: ${prismaMigrationSyncScriptPath}`));
+  }
   console.log(chalk.dim(`Statements: ${result.keptStatements.length}`));
   console.log(
     chalk.dim(`Removed redundant statements: ${result.removedStatements.length}`)

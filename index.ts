@@ -4,6 +4,10 @@ import { join } from "path";
 import chalk from "chalk";
 import { isDmlStatement, parseSQL } from "./src/parser";
 import { scanMigrations, type Migration } from "./src/scanner";
+import {
+  buildPrismaMigrationSyncScript,
+  PRISMA_MIGRATION_SYNC_SCRIPT_NAME,
+} from "./src/prisma-sync";
 import { squashMigrations } from "./src/squash";
 import { parseExcludePatterns } from "./src/selection";
 import { assertOutputDirNotInSelectedMigrations } from "./src/output";
@@ -265,12 +269,25 @@ async function main() {
 
     const outputPath = join(outputDir, "migration.sql");
     await writeFile(outputPath, result.sql, "utf-8");
+    const prismaMigrationSyncScriptPath = join(
+      options.migrationsPath,
+      PRISMA_MIGRATION_SYNC_SCRIPT_NAME
+    );
+    await writeFile(
+      prismaMigrationSyncScriptPath,
+      buildPrismaMigrationSyncScript({
+        outputMigrationName: outputName,
+        outputSql: result.sql,
+        replacedMigrations: selected,
+      }),
+      "utf-8"
+    );
 
     for (const migration of selected) {
       await rm(migration.path, { recursive: true, force: true });
     }
 
-    printResult(outputPath, result);
+    printResult(outputPath, result, prismaMigrationSyncScriptPath);
   } catch (error) {
     console.error(chalk.red(`Error: ${error}`));
     process.exit(1);
